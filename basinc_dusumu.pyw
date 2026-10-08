@@ -376,14 +376,38 @@ def set_initial_sash(pw, frac):
     pw.bind("<Map>", on_map)
 
 
+def _log_tick_label(v, _pos=None):
+    if v <= 0:
+        return ""
+    if 1e-3 <= v < 1e5:
+        return "%g" % v
+    e = int(math.floor(math.log10(v) + 1e-9))
+    mant = v / 10.0 ** e
+    if abs(mant - 1.0) < 1e-6:
+        return r"$10^{%d}$" % e
+    return r"$%g\times10^{%d}$" % (round(mant, 2), e)
+
+
 def no_minor_labels(ax):
-    """Log eksenlerde okunaklı etiketler: 1, 1.5, 2, 3, 5, 7 x 10^n."""
-    for axis, scale, subs in ((ax.xaxis, ax.get_xscale(), (1.0, 2.0, 5.0)),
-                              (ax.yaxis, ax.get_yscale(), (1.0, 1.5, 2.0, 3.0, 5.0, 7.0))):
+    """Log eksenlerde okunaklı, üst üste binmeyen etiketler (aralığın genişliğine göre)."""
+    for axis, scale, lims, is_x in ((ax.xaxis, ax.get_xscale(), ax.get_xlim(), True),
+                                    (ax.yaxis, ax.get_yscale(), ax.get_ylim(), False)):
         if scale != "log":
             continue
+        lo, hi = min(lims), max(lims)
+        decades = math.log10(hi / lo) if lo > 0 and hi > 0 else 0.0
+        if decades >= 2.0:
+            subs = (1.0,)
+        elif decades >= 1.0 or is_x:
+            subs = (1.0, 2.0, 5.0)
+        else:
+            subs = (1.0, 1.5, 2.0, 3.0, 5.0, 7.0)
         axis.set_major_locator(LogLocator(base=10, subs=subs))
-        axis.set_major_formatter(FuncFormatter(lambda v, _p: "%g" % v))
+        if decades >= 2.0:
+            axis.set_major_formatter(FuncFormatter(
+                lambda v, _p: r"$10^{%d}$" % round(math.log10(v)) if v > 0 else ""))
+        else:
+            axis.set_major_formatter(FuncFormatter(_log_tick_label))
         axis.set_minor_formatter(NullFormatter())
 
 
@@ -1387,10 +1411,10 @@ class CurveTab(BaseTab):
                                                 state="readonly", width=10), 0)
         self.qmin = self.var("qmin", "1")
         self.qmax = self.var("qmax", "20")
-        self.qn = self.var("qn", "40")
+        self.qstep = self.var("qstep", "1")
         labeled(q, "Debi min:", ttk.Entry(q, textvariable=self.qmin, width=12), 1)
         labeled(q, "Debi max:", ttk.Entry(q, textvariable=self.qmax, width=12), 2)
-        labeled(q, "Nokta sayısı:", ttk.Entry(q, textvariable=self.qn, width=12), 3)
+        labeled(q, "Debi artışı:", ttk.Entry(q, textvariable=self.qstep, width=12), 3)
         self.dpunit = self.var("dpunit", "kPa")
         labeled(q, "dP birimi:", ttk.Combobox(q, textvariable=self.dpunit, values=DP_UNIT_NAMES,
                                               state="readonly", width=10), 4)
@@ -1401,6 +1425,28 @@ class CurveTab(BaseTab):
         ttk.Button(a, text="Tabloyu CSV'ye kaydet", command=self.export).pack(fill="x", pady=2)
         self.status = ttk.Label(a, text="", foreground="#a33", wraplength=220)
         self.status.pack(fill="x", pady=4)
+
+        # Tek nokta sorgusu
+        pq = ttk.LabelFrame(top, text="Nokta sorgusu")
+        pq.pack(side="left", fill="y", padx=3)
+        self.pt_q = self.var("pt_q", "")
+        self.pt_T = self.var("pt_T", "")
+        self.pt_q_lbl = ttk.Label(pq, text="Debi:")
+        self.pt_q_lbl.grid(row=0, column=0, sticky="w", padx=(4, 2), pady=2)
+        e1 = ttk.Entry(pq, textvariable=self.pt_q, width=10)
+        e1.grid(row=0, column=1, sticky="ew", padx=(2, 6), pady=2)
+        e2 = labeled(pq, "Sıcaklık [°C]:", ttk.Entry(pq, textvariable=self.pt_T, width=10), 1)
+        for e in (e1, e2):
+            e.bind("<Return>", lambda ev: self.query_point())
+        ttk.Button(pq, text="dP hesapla", command=self.query_point).grid(row=2, column=0, columnspan=2,
+                                                                          sticky="ew", padx=4, pady=3)
+        self.pt_dp = ttk.Label(pq, text="", font=("Segoe UI", 11, "bold"))
+        self.pt_dp.grid(row=3, column=0, columnspan=2, sticky="w", padx=4)
+        self.pt_result = ttk.Label(pq, text="", justify="left", wraplength=230)
+        self.pt_result.grid(row=4, column=0, columnspan=2, sticky="w", padx=4)
+        self.qunit.trace_add("write", lambda *a: self._update_pt_label())
+        self._update_pt_label()
+        self.pt = None
 
         pw = ttk.PanedWindow(self, orient="horizontal")
         pw.pack(fill="both", expand=True, padx=4, pady=4)
@@ -1482,6 +1528,8 @@ class CurveTab(BaseTab):
         try:
             self._calculate()
             self.status.configure(text=self._status_msg, foreground="#264")
+            if self.pt_q.get().strip() and self.pt_T.get().strip():
+                self.query_point(silent=True)
         except Exception as e:  # noqa: BLE001
             self.out = None
             set_tree_columns(self.tree, ["-"])
@@ -1491,7 +1539,10 @@ class CurveTab(BaseTab):
             if not silent:
                 messagebox.showerror("Hesap hatası", str(e), parent=self)
 
-    def _calculate(self):
+    def _update_pt_label(self):
+        self.pt_q_lbl.configure(text="Debi [%s]:" % self.qunit.get())
+
+    def _prepare(self):
         c = self.app.data["curves"].get(self.curve.get())
         if not c:
             raise ValueError("Re - Lc eğrisi seçin.")
@@ -1501,6 +1552,37 @@ class CurveTab(BaseTab):
         name = self.fluid.get()
         frows = self.fluid_rows(name)
         Dh = self.need_float(self.dh, "Dh", positive=True) * 1e-3
+        return c, model, re_min, re_max, desc, name, frows, Dh
+
+    def query_point(self, silent=False):
+        try:
+            c, model, re_min, re_max, _desc, name, frows, Dh = self._prepare()
+            q = self.need_float(self.pt_q, "Debi", positive=True)
+            T = self.need_float(self.pt_T, "Sıcaklık")
+            uq, udp = self.qunit.get(), self.dpunit.get()
+            p, oor = fluid_props_checked(frows, T, name)
+            rho, mu = p["rho"], p["mu"]
+            A = math.pi * Dh * Dh / 4.0
+            v = to_mdot(q, uq, rho) / rho / A
+            Re = rho * v * Dh / mu
+            K = float(model(Re))
+            dP = K * 0.5 * rho * v * v
+            self.pt_dp.configure(text="dP = %s %s" % (fmt(dP / DP_UNITS[udp], 5), udp))
+            lines = ["Re = %s    Lc = %s    v = %s m/s" % (fmt(Re, 5), fmt(K, 4), fmt(v, 4))]
+            if Re < re_min * (1 - 1e-9) or Re > re_max * (1 + 1e-9):
+                lines.append("[!] Re eğri aralığı dışında")
+            if oor:
+                lines.append("[!] T akışkan tablosu dışında")
+            self.pt_result.configure(text="\n".join(lines), foreground="#000")
+            self.pt = dict(q=q, dP=dP, T=T, Re=Re, K=K, uq=uq)
+        except Exception as e:  # noqa: BLE001
+            self.pt = None
+            self.pt_dp.configure(text="")
+            self.pt_result.configure(text="" if silent else "HATA:\n%s" % e, foreground="#a33")
+        self.draw()
+
+    def _calculate(self):
+        c, model, re_min, re_max, desc, name, frows, Dh = self._prepare()
         tmin = self.need_float(self.tmin, "T min")
         tmax = self.need_float(self.tmax, "T max")
         tstep = parse_float(self.tstep.get())
@@ -1519,14 +1601,15 @@ class CurveTab(BaseTab):
                 Ts.append(tmax)
         qmin = self.need_float(self.qmin, "Debi min")
         qmax = self.need_float(self.qmax, "Debi max", positive=True)
-        try:
-            qn = int(float(self.qn.get()))
-        except ValueError:
-            raise ValueError("Nokta sayısı tam sayı olmalı.")
-        qn = max(2, min(qn, 5000))
+        qstep = self.need_float(self.qstep, "Debi artışı", positive=True)
         if qmin < 0 or qmin >= qmax:
             raise ValueError("Debi aralığı geçersiz (0 ≤ min < max).")
-        qs = np.linspace(qmin, qmax, qn)
+        nq = int(math.floor((qmax - qmin) / qstep + 1e-9)) + 1
+        if nq > 5000:
+            raise ValueError("Çok fazla debi noktası (%d). Artışı büyütün." % nq)
+        qs = qmin + qstep * np.arange(nq)
+        if qs[-1] < qmax - 1e-9 * max(1.0, abs(qmax)):
+            qs = np.append(qs, qmax)
         uq = self.qunit.get()
         udp = self.dpunit.get()
         A = math.pi * Dh * Dh / 4.0
@@ -1586,8 +1669,8 @@ class CurveTab(BaseTab):
         if not o:
             self.canvas.draw_idle()
             return
-        gs = self.fig.add_gridspec(1, 3)
-        ax = self.fig.add_subplot(gs[0, :2])
+        gs = self.fig.add_gridspec(1, 2, width_ratios=[5, 3])
+        ax = self.fig.add_subplot(gs[0, 0])
         f = DP_UNITS[o["udp"]]
         n = len(o["series"])
         cmap = matplotlib.colormaps["coolwarm"] if hasattr(matplotlib, "colormaps") \
@@ -1598,13 +1681,17 @@ class CurveTab(BaseTab):
             inside = np.where(s["out"], np.nan, y)
             ax.plot(o["qs"], y, "--", color=col, lw=1, alpha=0.6)
             ax.plot(o["qs"], inside, "-", color=col, lw=2, label="%s °C" % fmt(s["T"], 5))
+        pt = self.pt if self.pt and self.pt["uq"] == o["uq"] else None
+        if pt:
+            ax.plot([pt["q"]], [pt["dP"] / f], "k*", ms=12, zorder=5,
+                    label="sorgu: %s °C" % fmt(pt["T"], 5))
         ax.set_xlabel("Debi [%s]" % o["uq"])
         ax.set_ylabel("dP [%s]" % o["udp"])
         ax.set_title("dP - Debi  (%s, Dh = %s mm)" % (self.fluid.get(), self.dh.get()))
         ax.grid(True, alpha=0.3)
         ax.legend(fontsize=8, ncol=2 if n > 8 else 1)
 
-        ax2 = self.fig.add_subplot(gs[0, 2])
+        ax2 = self.fig.add_subplot(gs[0, 1])
         c = o["curve"]
         re_a = np.array(c["re"], dtype=float)
         k_a = np.array(c["k"], dtype=float)
@@ -1615,6 +1702,8 @@ class CurveTab(BaseTab):
         rr = np.logspace(math.log10(lo), math.log10(hi), 200)
         ax2.plot(rr, o["model"](rr), "-", color="C3", lw=1.5, label="model")
         ax2.axvspan(o["re_min"], o["re_max"], color="C2", alpha=0.08, label="veri aralığı")
+        if pt:
+            ax2.plot([pt["Re"]], [pt["K"]], "k*", ms=11, zorder=5)
         ax2.set_xscale("log")
         if np.all(k_a > 0):
             ax2.set_yscale("log")
