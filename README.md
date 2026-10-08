@@ -30,7 +30,8 @@ Klasör yazılabilir değilse dosya kullanıcı ana klasörüne yazılır (Dosya
    (sıcaklık sütunu yoksa sabit değer verilebilir). Sonuç Re–Lc tablosu CSV'ye kaydedilebilir,
    grafiklerle gösterilir ve Sekme 4 için "eğri" olarak saklanabilir.
 4. **dP vs Debi** – Kayıtlı (veya CSV'den yüklenen) Re–Lc eğrisi, akışkan, Dh, sıcaklık aralığı /
-   adımı ve debi aralığı seçilir; her sıcaklık için dP–debi eğrileri çizilir, tablo CSV'ye kaydedilir.
+   adımı ve debi aralığı (min, max, artış) seçilir; her sıcaklık için dP–debi eğrileri çizilir, tablo CSV'ye
+   kaydedilir. "Nokta sorgusu" ile girilen debi ve sıcaklıktaki dP (Re, Lc, v ile) hesaplanır ve grafikte ★ ile gösterilir.
    Model: log-log interpolasyon, güç yasası (Lc = a·Re^b) veya log-log 2. derece polinom.
    Eğrinin Re aralığı dışındaki kısımlar kesikli çizilir.
 
